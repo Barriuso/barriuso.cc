@@ -1,0 +1,65 @@
+name: Import reviewed website source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - barriuso-web-source.zip
+      - .github/workflows/import-reviewed-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-reviewed-source
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'Barriuso/barriuso.cc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and restore the reviewed source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          import stat
+          import zipfile
+
+          archive = pathlib.Path('barriuso-web-source.zip')
+          expected = '559d79582f04ef3e5852625c17efe4c6e2d2eaaa0b4853ccc71675626c7a6a1a'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+              raise SystemExit('The source archive does not match the reviewed version.')
+          root = pathlib.Path.cwd().resolve()
+          allowed_files = {'.env.example', '.gitattributes', '.gitignore', 'README.md', 'index.html', 'package-lock.json', 'package.json', 'site.config.json', 'tsconfig.json', 'vite.config.ts'}
+          allowed_dirs = {'src', 'public', 'scripts'}
+          with zipfile.ZipFile(archive) as source:
+              for entry in source.infolist():
+                  name = pathlib.PurePosixPath(entry.filename)
+                  if name.is_absolute() or '..' in name.parts or '\\' in entry.filename or stat.S_ISLNK(entry.external_attr >> 16):
+                      raise SystemExit('Invalid archive path.')
+                  if entry.is_dir() or name.parts[0] == '.github':
+                      continue
+                  if name.parts[0] not in allowed_dirs and str(name) not in allowed_files:
+                      raise SystemExit('Unexpected file in the source archive.')
+                  target = root.joinpath(*name.parts)
+                  target.resolve().relative_to(root)
+                  if target.exists():
+                      raise SystemExit('Existing source would be overwritten.')
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(source.read(entry))
+          print('Reviewed source restored. Deployment workflow is configured separately.')
+          PY
+      - name: Save the restored source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .env.example .gitattributes .gitignore README.md index.html package-lock.json package.json site.config.json tsconfig.json vite.config.ts src public scripts
+          git rm -- barriuso-web-source.zip
+          git commit -m 'Restore reviewed barriuso website source'
+          git push origin HEAD:main
